@@ -1,0 +1,9 @@
+config.json
+data/
+release/
+__pycache__/
+*.pyc
+*.session
+失败清单.txt
+_test_dl/
+_test_pause/
