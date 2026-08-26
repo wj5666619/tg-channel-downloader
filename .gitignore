@@ -1,6 +1,8 @@
 config.json
 data/
 release/
+downloads/
+upload_release.py
 __pycache__/
 *.pyc
 *.session
