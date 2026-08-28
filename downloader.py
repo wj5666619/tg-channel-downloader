@@ -592,20 +592,22 @@ class DlStat:
         self.t0 = time.time()
         self.last_bytes = 0
         self.last_ts = self.t0
+        self.last_progress = 0  # 上次报告的进度，用于检测停滞
 
     def feed(self, current, total):
         now = time.time()
         self.got = current
         self.last_bytes = current
         self.last_ts = now
+        # 每 5 秒报告一次进度
         if total and now - self.t0 >= 5:
             speed = current / max(1e-9, now - self.t0) / 1048576
             log(f'[下载] #{self.msg_id} 进度 {current / 1048576:.1f}/{total / 1048576:.1f}MB ({speed:.1f} MB/s)')
             self.t0 = now
 
-    def check_stall(self):
-        """90 秒无任何进度 → 视为连接僵死"""
-        if time.time() - self.last_ts > 90:
+    def check_stall(self, stall_timeout=180):
+        """180 秒无进度 → 视为连接僵死（可配置）"""
+        if time.time() - self.last_ts > stall_timeout:
             raise TimeoutError(f'#{self.msg_id} 下载停滞 {time.time() - self.last_ts:.0f}s, 判定连接僵死')
 
 
@@ -620,6 +622,7 @@ async def parallel_download(client, m, target, size):
     st = DlStat(m.id)
     seg_files = []
     timers = [time.time()]  # 进度日志节流
+    stall_check_timer = [time.time()]  # 停滞检测计时器
 
     def progress_hook():
         now = time.time()
@@ -643,7 +646,7 @@ async def parallel_download(client, m, target, size):
             with open(seg, 'wb') as f:
                 while True:
                     try:
-                        chunk = await asyncio.wait_for(it.__anext__(), timeout=90)
+                        chunk = await asyncio.wait_for(it.__anext__(), timeout=180)
                     except StopAsyncIteration:
                         break
                     st.feed(st.got + len(chunk), size)
@@ -729,7 +732,7 @@ async def download_with_retry(client, m, target, kind):
             parallel_mb = float(os.environ.get('TGDL_PARALLEL_MB', '4'))
             if size > parallel_mb * 1048576:
                 await asyncio.wait_for(
-                    parallel_download(client, m, target, size), timeout=2400)
+                    parallel_download(client, m, target, size), timeout=3600)
             else:
                 await asyncio.wait_for(
                     simple_download(client, m, target, size), timeout=1800)
@@ -737,6 +740,23 @@ async def download_with_retry(client, m, target, kind):
             return 'ok'
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError:
+            # 总超时: 清理分片后重试
+            for i in range(200):  # 清理可能的 .partN 分片
+                p = f'{target}.part{i}'
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+                else:
+                    break
+            if attempt == RETRIES - 1:
+                log(f'[失败] #{m.id} 下载超时 (重试耗尽)')
+                return 'fail'
+            wait = delays[attempt]
+            log(f'[重试] #{m.id} 超时 → {wait}s 后第 {attempt + 2} 次')
+            await asyncio.sleep(wait)
         except Exception as e:
             if attempt == RETRIES - 1:
                 log(f'[失败] #{m.id} {type(e).__name__}: {str(e)[:120]} (重试耗尽)')
