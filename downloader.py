@@ -457,6 +457,28 @@ def ask_config():
     if 'out_dir' not in cfg and cfg.get('mode') == '1':
         cfg['out_dir'] = input(f'\n保存目录 [downloads]: ').strip() or 'downloads'
 
+    # 检查凭证是否已配置
+    has_creds = bool(cfg.get('api_id') and cfg.get('api_hash'))
+    if not has_creds:
+        print('\n[API 凭证] 未检测到 api_id/api_hash')
+        print('  请前往 https://my.telegram.org 申请')
+        while True:
+            try:
+                api_id = input('api_id (数字): ').strip()
+                if api_id.isdigit():
+                    cfg['api_id'] = int(api_id)
+                    break
+                print('  请输入有效数字')
+            except EOFError:
+                print('\n未输入凭证, 无法运行。')
+                sys.exit(1)
+        while True:
+            api_hash = input('api_hash (字符串): ').strip()
+            if api_hash:
+                cfg['api_hash'] = api_hash
+                break
+            print('  api_hash 不能为空')
+
     json.dump(cfg, open(MY_CONFIG, 'w', encoding='utf-8'),
               ensure_ascii=False, indent=2)
     print(f'\n配置已保存到 config.json\n')
