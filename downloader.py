@@ -479,6 +479,10 @@ def ask_config():
                 break
             print('  api_hash 不能为空')
 
+    # 确保 proxy 字段存在 (可能因重新配置丢失)
+    if 'proxy' not in cfg:
+        cfg['proxy'] = 'system'
+
     json.dump(cfg, open(MY_CONFIG, 'w', encoding='utf-8'),
               ensure_ascii=False, indent=2)
     print(f'\n配置已保存到 config.json\n')
