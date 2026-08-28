@@ -646,9 +646,16 @@ async def parallel_download(client, m, target, size):
             with open(seg, 'wb') as f:
                 while True:
                     try:
-                        chunk = await asyncio.wait_for(it.__anext__(), timeout=180)
+                        # 分片超时改为 300 秒，避免代理抖动误判
+                        chunk = await asyncio.wait_for(it.__anext__(), timeout=300)
                     except StopAsyncIteration:
                         break
+                    except asyncio.TimeoutError:
+                        # 单片超时: 已下载的部分保留，返回部分结果
+                        if got > 0:
+                            log(f'[续传] #{m.id} 分片{idx} 部分完成 {got}/{ln}MB，保留断点')
+                            return seg  # 保留已下载的分片
+                        raise
                     st.feed(st.got + len(chunk), size)
                     take = min(len(chunk), ln - got)
                     if take > 0:
