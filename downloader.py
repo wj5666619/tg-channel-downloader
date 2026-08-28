@@ -739,7 +739,7 @@ async def download_with_retry(client, m, target, kind):
             parallel_mb = float(os.environ.get('TGDL_PARALLEL_MB', '4'))
             if size > parallel_mb * 1048576:
                 await asyncio.wait_for(
-                    parallel_download(client, m, target, size), timeout=3600)
+                    parallel_download(client, m, target, size), timeout=7200)
             else:
                 await asyncio.wait_for(
                     simple_download(client, m, target, size), timeout=1800)
@@ -748,21 +748,16 @@ async def download_with_retry(client, m, target, kind):
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
-            # 总超时: 清理分片后重试
-            for i in range(200):  # 清理可能的 .partN 分片
-                p = f'{target}.part{i}'
-                if os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
-                else:
-                    break
+            # 总超时: 不清除分片，保留断点供下次续传
+            completed = sum(1 for i in range(200)
+                          if os.path.exists(f'{target}.part{i}')
+                          and os.path.getsize(f'{target}.part{i}') == PART)
+            log(f'[重试] #{m.id} 超时，已完片 {completed} 个，保留断点')
             if attempt == RETRIES - 1:
                 log(f'[失败] #{m.id} 下载超时 (重试耗尽)')
                 return 'fail'
             wait = delays[attempt]
-            log(f'[重试] #{m.id} 超时 → {wait}s 后第 {attempt + 2} 次')
+            log(f'[重试] #{m.id} → {wait}s 后第 {attempt + 2} 次')
             await asyncio.sleep(wait)
         except Exception as e:
             if attempt == RETRIES - 1:
