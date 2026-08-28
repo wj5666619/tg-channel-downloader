@@ -1,7 +1,8 @@
 config.json
 data/
-release/
 downloads/
+runtime/
+release/
 upload_release.py
 __pycache__/
 *.pyc

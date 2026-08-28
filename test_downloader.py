@@ -4,7 +4,9 @@ import sys
 import os
 from types import SimpleNamespace
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+BASE = os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv[0] else ''))
+if not BASE or BASE == '.':
+    BASE = os.getcwd()
 sys.path.insert(0, BASE)
 
 import downloader as D

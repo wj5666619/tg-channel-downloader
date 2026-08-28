@@ -13,7 +13,9 @@ import zipfile
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 VERSION = '1.0.0'
-RUNTIME_SRC = r'D:\myq\AI\tg-channel-reposter\runtime\python'
+RUNTIME_SRC = os.path.normpath(os.path.join(BASE, '..', 'tg-channel-reposter', 'runtime', 'python'))
+if not os.path.exists(RUNTIME_SRC):
+    RUNTIME_SRC = os.path.normpath(os.path.join(BASE, 'runtime', 'python'))
 OUT_DIR = os.path.join(BASE, 'release')
 ZIP_PATH = os.path.join(OUT_DIR, f'tg-channel-downloader-v{VERSION}-windows-portable.zip')
 
