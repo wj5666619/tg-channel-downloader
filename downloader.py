@@ -254,6 +254,42 @@ def parse_date(s, default_end=False):
     raise ValueError(f'日期格式不对: {s} (示例 2026-01-01)')
 
 
+def resolve_link(text):
+    """解析 t.me 链接 → (entity_id, message_id)
+
+    支持格式:
+      https://t.me/channel/123
+      https://t.me/channel/post/123
+      https://t.me/username/456
+      https://t.me/c/123456/789  (私聊频道)
+      t.me/channel/789
+    """
+    import re as _re
+    text = text.strip()
+    # 提取 t.me 域名后的部分
+    m = _re.search(r't\.me[/?](.+)', text)
+    if not m:
+        raise ValueError('不是有效的 t.me 链接')
+    path = m.group(1).split('?')[0].strip('/')
+    parts = path.split('/')
+    if len(parts) < 2:
+        raise ValueError('链接格式不完整, 需要包含频道和消息ID')
+    # 处理 c/ID 格式 (私聊频道)
+    if parts[0] == 'c' and len(parts) >= 2:
+        entity = int(parts[1]) + 1000000000000
+        msg_str = parts[-1]
+    else:
+        entity = parts[0]
+        msg_str = parts[-1]
+    if not _re.fullmatch(r'\d+', msg_str):
+        raise ValueError(f'无法从链接提取消息ID: {msg_str}')
+    msg_id = int(msg_str)
+    # entity 可能是 @用户名 或数值ID
+    if isinstance(entity, str) and entity.startswith('@'):
+        entity = entity[1:]
+    return entity, msg_id
+
+
 def ask_config():
     """首次运行或用户要求更改时, 交互收集目标/日期/输出目录, 存入 config.json"""
     import datetime
@@ -273,41 +309,152 @@ def ask_config():
         print('! 请先编辑 config.json 填入 api_id / api_hash')
         print('! (https://my.telegram.org 申请, 详见 README)\n')
     cur = cfg.get('target', '')
-    print(f'当前目标: {cur or "(未设置)"}')
+    mode = cfg.get('mode', 'date')
+    print(f'当前目标: {cur or "(未设置)"}  |  当前模式: {mode}')
     if input('直接回车用当前配置, 输入 y 重新设置: ').strip().lower() == 'y':
         cfg = {}
 
-    if 'target' not in cfg or not cfg['target']:
+    # 模式选择
+    if 'mode' not in cfg:
+        print('\n[下载模式]')
+        print('  1 - 按日期范围 (原有模式)')
+        print('  2 - 从链接到最新  (单条消息链接 → 频道最新)')
+        print('  3 - 从链接到链接  (两条消息链接区间)')
+        print('  4 - 单条链接      (只下指定消息)')
         while True:
-            txt = input('\n请输入频道/群聊链接或ID\n(t.me/xxx 或 -100xxxx 或 @用户名): ').strip()
             try:
-                cfg['target'] = str(resolve_entity_text(txt))
+                ch = input('\n选择模式 [1-4] (直接回车=1): ').strip() or '1'
+                if ch in ('1', '2', '3', '4'):
+                    cfg['mode'] = ch
+                    break
+                print('  请输入 1-4')
+            except EOFError:
+                cfg['mode'] = '1'
                 break
-            except ValueError as e:
-                print(f'  {e}, 请重新输入')
 
-    if 'start_date' not in cfg or 'end_date' not in cfg:
-        today = datetime.date.today().isoformat()
-        print('\n日期范围 (直接回车表示不限制)')
-        while True:
-            try:
-                sd = parse_date(input(f'开始日期(含, 示例 2026-01-01) [{cfg.get("start_date","")}]: ')) or None
-                break
-            except ValueError as e:
-                print(f'  {e}')
-        while True:
-            try:
-                ed = parse_date(input(f'结束日期(含) [{cfg.get("end_date", today)}]: ')) or None
-                break
-            except ValueError as e:
-                print(f'  {e}')
-        if sd and ed and sd > ed:
-            print('  开始日期晚于结束日期, 已交换')
-            sd, ed = ed, sd
-        cfg['start_date'] = sd.isoformat() if sd else ''
-        cfg['end_date'] = ed.isoformat() if ed else ''
+    # --- 日期范围模式 (mode=1) ---
+    if cfg.get('mode') == '1':
+        if 'target' not in cfg or not cfg['target']:
+            while True:
+                txt = input('\n请输入频道/群聊链接或ID\n(t.me/xxx 或 -100xxxx 或 @用户名): ').strip()
+                try:
+                    cfg['target'] = str(resolve_entity_text(txt))
+                    break
+                except ValueError as e:
+                    print(f'  {e}, 请重新输入')
 
-    if 'out_dir' not in cfg or not cfg['out_dir']:
+        if 'start_date' not in cfg or 'end_date' not in cfg:
+            today = datetime.date.today().isoformat()
+            print('\n日期范围 (直接回车表示不限制)')
+            while True:
+                try:
+                    sd = parse_date(input(f'开始日期(含, 示例 2026-01-01) [{cfg.get("start_date","")}]: ')) or None
+                    break
+                except ValueError as e:
+                    print(f'  {e}')
+            while True:
+                try:
+                    ed = parse_date(input(f'结束日期(含) [{cfg.get("end_date", today)}]: ')) or None
+                    break
+                except ValueError as e:
+                    print(f'  {e}')
+            if sd and ed and sd > ed:
+                print('  开始日期晚于结束日期, 已交换')
+                sd, ed = ed, sd
+            cfg['start_date'] = sd.isoformat() if sd else ''
+            cfg['end_date'] = ed.isoformat() if ed else ''
+
+    # --- 链接→最新模式 (mode=2) ---
+    elif cfg.get('mode') == '2':
+        print('\n[链接→最新] 从指定消息开始下载, 直到频道最新')
+        if 'target_link' not in cfg or not cfg['target_link']:
+            while True:
+                txt = input('起始消息链接 (t.me/.../编号): ').strip()
+                try:
+                    cfg['target_link'] = txt
+                    break
+                except ValueError as e:
+                    print(f'  {e}, 请重新输入')
+        if 'target' not in cfg or not cfg['target']:
+            # 从链接提取实体
+            try:
+                ent_id, _ = resolve_link(cfg['target_link'])
+                cfg['target'] = str(ent_id)
+            except ValueError as e:
+                print(f'  无法从链接解析实体: {e}')
+                while True:
+                    txt = input('或手动输入频道/群聊链接或ID: ').strip()
+                    try:
+                        cfg['target'] = str(resolve_entity_text(txt))
+                        break
+                    except ValueError as ex:
+                        print(f'  {ex}, 请重新输入')
+        if 'out_dir' not in cfg or not cfg['out_dir']:
+            cfg['out_dir'] = input(f'\n保存目录 [downloads]: ').strip() or 'downloads'
+
+    # --- 链接→链接模式 (mode=3) ---
+    elif cfg.get('mode') == '3':
+        print('\n[链接→链接] 下载两条消息之间的所有媒体')
+        if 'start_link' not in cfg or not cfg['start_link']:
+            while True:
+                txt = input('起始消息链接 (t.me/.../编号): ').strip()
+                try:
+                    cfg['start_link'] = txt
+                    break
+                except ValueError as e:
+                    print(f'  {e}, 请重新输入')
+        if 'end_link' not in cfg or not cfg['end_link']:
+            while True:
+                txt = input('结束消息链接 (t.me/.../编号): ').strip()
+                try:
+                    cfg['end_link'] = txt
+                    break
+                except ValueError as e:
+                    print(f'  {e}, 请重新输入')
+        if 'target' not in cfg or not cfg['target']:
+            try:
+                ent_id, _ = resolve_link(cfg['start_link'])
+                cfg['target'] = str(ent_id)
+            except ValueError as e:
+                print(f'  无法从起始链接解析实体: {e}')
+                while True:
+                    txt = input('或手动输入频道/群聊链接或ID: ').strip()
+                    try:
+                        cfg['target'] = str(resolve_entity_text(txt))
+                        break
+                    except ValueError as ex:
+                        print(f'  {ex}, 请重新输入')
+        if 'out_dir' not in cfg or not cfg['out_dir']:
+            cfg['out_dir'] = input(f'\n保存目录 [downloads]: ').strip() or 'downloads'
+
+    # --- 单条链接模式 (mode=4) ---
+    elif cfg.get('mode') == '4':
+        print('\n[单条链接] 只下载指定的一条消息')
+        if 'target_link' not in cfg or not cfg['target_link']:
+            while True:
+                txt = input('消息链接 (t.me/.../编号): ').strip()
+                try:
+                    cfg['target_link'] = txt
+                    break
+                except ValueError as e:
+                    print(f'  {e}, 请重新输入')
+        if 'target' not in cfg or not cfg['target']:
+            try:
+                ent_id, _ = resolve_link(cfg['target_link'])
+                cfg['target'] = str(ent_id)
+            except ValueError as e:
+                print(f'  无法从链接解析实体: {e}')
+                while True:
+                    txt = input('或手动输入频道/群聊链接或ID: ').strip()
+                    try:
+                        cfg['target'] = str(resolve_entity_text(txt))
+                        break
+                    except ValueError as ex:
+                        print(f'  {ex}, 请重新输入')
+        if 'out_dir' not in cfg or not cfg['out_dir']:
+            cfg['out_dir'] = input(f'\n保存目录 [downloads]: ').strip() or 'downloads'
+
+    if 'out_dir' not in cfg and cfg.get('mode') == '1':
         cfg['out_dir'] = input(f'\n保存目录 [downloads]: ').strip() or 'downloads'
 
     json.dump(cfg, open(MY_CONFIG, 'w', encoding='utf-8'),
@@ -342,6 +489,41 @@ async def collect(client, ent, start_dt, end_dt):
             continue
         if start_dt and (m.date.replace(tzinfo=None) if m.date.tzinfo else m.date) < start_dt:
             break
+        if m.media and media_kind(m):
+            items.append(m)
+    items.reverse()  # 旧 → 新
+    return items
+
+
+async def collect_from_link_to_latest(client, ent, start_msg_id):
+    """从指定消息ID开始, 下载到该频道最新 (mode=2)"""
+    items = []
+    async for m in client.iter_messages(ent, reverse=True, offset_id=start_msg_id):
+        if m.action is not None:
+            continue
+        if m.media and media_kind(m):
+            items.append(m)
+    items.reverse()  # 旧 → 新 (从起始消息到最新)
+    return items
+
+
+async def collect_from_link_to_link(client, ent, start_msg_id, end_msg_id):
+    """在两个消息ID之间扫描媒体 (mode=3)
+
+    注意: iter_messages 从前往后扫, start < end 时直接用;
+    若 start > end (用户填反了), 自动交换。
+    """
+    import datetime
+    # 确保 start <= end
+    if start_msg_id > end_msg_id:
+        start_msg_id, end_msg_id = end_msg_id, start_msg_id
+    items = []
+    # 使用 start_msg_id 作为 offset, 向前扫到 end_msg_id
+    async for m in client.iter_messages(ent, reverse=True, offset_id=start_msg_id):
+        if m.id <= end_msg_id:
+            break
+        if m.action is not None:
+            continue
         if m.media and media_kind(m):
             items.append(m)
     items.reverse()  # 旧 → 新
@@ -554,8 +736,7 @@ def targets_for(m, kind, out_root):
 async def main():
     cfg = ask_config()
     target = cfg['target']
-    start_dt = to_dt(cfg.get('start_date', ''))
-    end_dt = to_dt(cfg.get('end_date', ''), end_of_day=True)
+    mode = cfg.get('mode', '1')
     out_root = os.path.normpath(os.path.join(BASE_DIR, cfg.get('out_dir', 'downloads')))
 
     api_id, api_hash, proxy = load_credentials()
@@ -588,13 +769,73 @@ async def main():
     title = safe_name(getattr(ent, 'title', None) or str(ent.id))
     media_dir = os.path.join(out_root, title)
     os.makedirs(media_dir, exist_ok=True)
-    print(f'\n目标: {title} (ID {ent.id})')
-    print(f'范围: {cfg.get("start_date") or "不限"} ~ {cfg.get("end_date") or "今天"}')
-    print('正在扫描频道消息(只拉日期范围内, 稍候)...\n')
 
-    items = await collect(client, ent, start_dt, end_dt)
+    # 根据不同模式收集消息
+    items = []
+    if mode == '1':
+        # 日期范围模式
+        start_dt = to_dt(cfg.get('start_date', ''))
+        end_dt = to_dt(cfg.get('end_date', ''), end_of_day=True)
+        print(f'\n目标: {title} (ID {ent.id})')
+        print(f'范围: {cfg.get("start_date") or "不限"} ~ {cfg.get("end_date") or "今天"}')
+        print('正在扫描频道消息(只拉日期范围内, 稍候)...\n')
+        items = await collect(client, ent, start_dt, end_dt)
+
+    elif mode == '2':
+        # 链接→最新模式
+        try:
+            _, start_msg_id = resolve_link(cfg['target_link'])
+        except ValueError as e:
+            print(f'链接解析失败: {e}')
+            await client.disconnect()
+            sys.exit(1)
+        print(f'\n目标: {title} (ID {ent.id})')
+        print(f'起始消息: {cfg["target_link"]}')
+        print('正在扫描从该消息到最新, 稍候...\n')
+        items = await collect_from_link_to_latest(client, ent, start_msg_id)
+
+    elif mode == '3':
+        # 链接→链接模式
+        try:
+            _, start_msg_id = resolve_link(cfg['start_link'])
+            _, end_msg_id = resolve_link(cfg['end_link'])
+        except ValueError as e:
+            print(f'链接解析失败: {e}')
+            await client.disconnect()
+            sys.exit(1)
+        display_start = cfg['start_link'].split('/')[-1] if '/' in cfg['start_link'] else cfg['start_link']
+        display_end = cfg['end_link'].split('/')[-1] if '/' in cfg['end_link'] else cfg['end_link']
+        print(f'\n目标: {title} (ID {ent.id})')
+        print(f'范围: 消息 #{display_start} ~ #{display_end}')
+        print('正在扫描频道消息(稍候)...\n')
+        items = await collect_from_link_to_link(client, ent, start_msg_id, end_msg_id)
+
+    elif mode == '4':
+        # 单条链接模式
+        try:
+            _, msg_id = resolve_link(cfg['target_link'])
+        except ValueError as e:
+            print(f'链接解析失败: {e}')
+            await client.disconnect()
+            sys.exit(1)
+        print(f'\n目标: {title} (ID {ent.id})')
+        print(f'消息: {cfg["target_link"]}')
+        print('正在获取消息...\n')
+        try:
+            m = await client.get_messages(ent, ids=msg_id)
+            if m and m.media and media_kind(m):
+                items = [m]
+            else:
+                print('该消息没有视频或图片媒体。')
+                await client.disconnect()
+                return
+        except Exception as e:
+            print(f'获取消息失败: {type(e).__name__}: {str(e)[:150]}')
+            await client.disconnect()
+            sys.exit(1)
+
     if not items:
-        print('该日期范围内没有找到视频或图片消息。')
+        print('没有找到符合条件的媒体消息。')
         await client.disconnect()
         return
 
